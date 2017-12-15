@@ -1,0 +1,11 @@
+base
+dplyr
+ggplot2
+Rfit
+Rcpp
+Amelia
+nlme
+mgcv
+GGally
+knitr
+bindrcpp
