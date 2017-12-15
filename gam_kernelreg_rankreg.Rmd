@@ -1,0 +1,613 @@
+---
+title: 'Nonparametric analyses using GAMs, GLM, kernel regression, rank-based regression'
+author: "Jeremy Holcombe"
+date: "12/14/2017"
+output: html_document
+---
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+
+setwd("/Users/jh/Documents/GitHub/GAM-kernelreg-rankreg-R")
+
+library(dplyr)
+library(ggplot2)
+library(Rfit)
+library(Amelia)
+library(mgcv)
+library(GGally)
+library(knitr)
+
+# Load data set
+concrete <- read.csv("data/concrete.csv")
+
+```
+
+This report explores the use of various non-parametric techniques to analyze two different datasets. The first section examines the influence of age and ingredients on the compressive strength of concrete. The second section seeks to find an appropriate model for predicting the survival of passengers on the RMS Titanic using just their age and fare class. The non-parametric techniques employed in this report include rank-based regression, Nadarya-Watson kernel regression, general additive models, and bootstrapped estimates of various statistics.
+
+# Concrete Compressive Strength
+
+This section examines the effect of age and various ingredients on the compressive strength of concrete. The data consists of 1,030 samples of different mixtures of concrete, measured under laboratory conditions. The outcome variable, compressive strength, is continuous and measured in megapascals (MPa), a metric measurement for pounds per square inch. The four explanatory variables considered include the age of the mixture (in days) and three ingredients: cement, blast furnace slag, and coarse aggregate, each measured by their composition in the final mixture (kg).
+
+The subsections that follow first explore the data to ensure its fitness for analysis, then examine the significance of each predictor in explaining the variation in the outcome, and finally consider a predictive model using a non-parametric regression technique.
+
+## Exploring the Data
+
+Prior to analysis, it is important to investigate the data to understand the range and distribution of each variable, as well as determine if there are missing values or outliers that must be remediated. The summary statistics below indicate the each variable is continuous, with varying scales and locations. However, we will be employing unregularized regression as a modeling technique, which is both scale- and location-invariant, so we can leave these variables in their original scale.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+
+# Select four predictors
+df1 <- concrete[, c("age", "cement", "slag", "coarseagg", "strength")]
+
+# Examine summary statistics of the resulting data
+summary(df1)
+
+```
+
+It is also helpful to examine the bivariate relationships between each variable to identify outliers or other important features, such as possible censorship. Figure 1 shows the univariate distributions of each predictor variable along with the bivariate relationships between the predictors. There do not appear to be any outliers present in the data. However, the scatterplot matrix does reveal a strong right skew in the distribution of the age variable, which can be addressed by log-transforming `age`.
+
+```{r, echo=TRUE, fig.cap="Scatterplot matrix of predictor variables", fig.height=4, fig.width=5, message=FALSE, warning=FALSE}
+
+ggpairs(df1)
+
+```
+
+Figure 2 shows the univariate distribution of `age` before and after log-transforming the variable. The log-transformed variable appears to have a more well-behaved distribution.
+
+```{r, echo=TRUE, fig.cap="Histogram of Age, before and after log transformation", fig.height=2.5, fig.width=6, message=FALSE, warning=FALSE}
+
+par(mfrow=c(1, 2))
+hist(df1$age, main="Histogram of Age", xlab="Age")
+hist(log(df1$age), main="Histogram of Log Age", xlab="log(Age)")
+
+```
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+
+# Log-transform age variable
+df1$age <- log(df1$age)
+
+```
+
+## Measures of Predictor Significance
+
+Although there do not appear to be outliers present in the data, a robust fitting procedure can still be used to regress the outcome on the predictors. While a robust linear regression model (such as the rank-based regression technique we use here) provides a way to fit a model that will not be unduly influenced by extreme observations, it also precludes us from using standard techniques to measure the significance of the predictors. Rather than computing an _F_-statistic and observing its location relative to the _F_-distribution, we must instead utilize a custom-defined test statistic and construct a sampling distribution for that statistic using the bootstrap in order to obtain a _p_-value.
+
+To calculate the statistic, _G_, I first fit a full rank-based regression model using all four predictors and observed its residuals. Then, for each predictor, I fit a reduced model excluding that single predictor and observed the corresponding residuals from the model. Finally, I computed the _G_-statistic for each predictor by calculating the difference in the sum of absolute residuals between each reduced model and the full model.
+
+In order to determine the statistical significance of the predictor, I then created a sampling distribution for the _G_-statistic for each predictor under the null hypothesis that the reduced model accurately reflects reality. The extent to which the observed _G_-statistic lies outside the sampling distribution constructed using the bootstrap indicates the probability that we would observe this statistic if the null hypothesis were true. Extremely low probabilities lead us to reject the null hypothesis in favor of the alternative, indicating the statistical significance of the predictor.
+
+The _p_-values were computed under both a non-parametric setting, generating a new outcome variable by adding errors drawn from the resampled residuals of the reduced model, and a parametric setting, generating the outcome variable by adding errors drawn from a normal distribution with the same spread as the residuals from the reduced model.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+
+# Rank-based regression
+model.full <- rfit(strength ~ ., data=df1)
+
+# Testing individual significance of each predictor
+G.obs <- rep(0, 4)
+for (i in 1:4) {
+  model.red <- rfit(strength ~ ., data=df1[, -i])
+  G.obs[i] <- max(0, sum(abs(model.red$residuals)) - sum(abs(model.full$residuals)))
+}
+
+# NONPARAMETRIC: Calculate p-values -------------------------------------------
+n <- nrow(df1)
+B <- 5000
+p.boot.nparm <- rep(0, 4)
+for (i in 1:4) {
+  # Fit reduced model
+  model.red <- rfit(strength ~ ., data=df1[, -i])
+  
+  # Create sampling distribution of G statistic under null hypothesis
+  G.boot.nparm <- rep(0, B)
+  for (b in 1:B) {
+    res.new <- model.red$residuals[sample(1:n, n, replace=T)]
+    y.new <- model.red$fitted.values + res.new
+    model.boot <- rfit(y.new ~ ., df1)
+    G.boot.nparm[b] <- max(0, sum(
+      abs(model.red$residuals)) - sum(abs(model.boot$residuals)))
+  }
+  p.boot.nparm[i] <- mean(G.boot.nparm >= G.obs[i])
+}
+
+# PARAMETRIC: Calculate p-values ----------------------------------------------
+n <- nrow(df1)
+B <- 5000
+p.boot.parm <- rep(0, 4)
+for (i in 1:4) {
+  # Fit reduced model
+  model.red <- rfit(strength ~ ., data=df1[, -i])
+  
+  # Create sampling distribution of G statistic under null hypothesis
+  G.boot.parm <- rep(0, B)
+  for (b in 1:B) {
+    y.new <- model.red$fitted.values + rnorm(n, 0, sd(model.red$residuals))
+    model.boot <- rfit(y.new ~ ., df1)
+    G.boot.parm[b] <- max(0, sum(
+      abs(model.red$residuals)) - sum(abs(model.boot$residuals)))
+  }
+  p.boot.parm[i] <- mean(G.boot.parm >= G.obs[i])
+}
+
+# Create dataframe with results
+p.table <- data.frame(rbind(p.boot.nparm, p.boot.parm))
+names(p.table) <- names(df1)[1:4]
+
+kable(p.table, caption="Statistical significance (p-value) of predictors", 
+      digits=3)
+
+```
+
+Based on the results from Table 1, it is clear that the predictors `age`, `cement`, and `slag` are highly statistically significant, while `coarseagg` does not appear have any influence on the compressive strength of concrete in the sample. In fact, both the non-parametric and parametric methods for computing _p_-values produced similar results, indicating that the assumption of normally distributed errors in the case of the parametric method likely holds. We can further confirm this by plotting the full model residuals against the fitted values. In Figure 3, the residuals appear to be more loosely distributed about zero as in the fitted values increase, perhaps indicating heteroskedasticity, but also appear to be roughly normally distributed about zero.
+
+```{r, echo=TRUE, fig.cap="Residual plot", fig.height=3, fig.width=4, message=FALSE, warning=FALSE}
+
+plot(model.full$fitted.values, model.full$residuals, main="",
+     xlab="Fitted Values", ylab="Residuals")
+
+```
+
+It can also be helpful to determine the significance of all of the predictors by comparing the full model to a null model. According to Table 2, the predictors appeared to be highly significant, as the _p_-value for each under the null hypothesis that the null model is correct was zero.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+
+# Testing significance of all predictors
+residuals.null <- df1$strength - median(df1$strength)
+G.null <- max(0, sum(abs(residuals.null)) - sum(abs(model.full$residuals)))
+
+# NONPARAMETRIC: Calculate p-values -------------------------------------------
+# Create sampling distribution of G statistic under null hypothesis
+n <- nrow(df1)
+B <- 5000
+G.boot.nparm <- rep(0, B)
+for (b in 1:B) {
+  res.new <- residuals.null[sample(1:n, n, replace=T)]
+  y.new <- median(df1$strength) + res.new
+  model.boot <- rfit(y.new ~ ., df1)
+  G.boot.nparm[b] <- max(0, sum(
+    abs(residuals.null)) - sum(abs(model.boot$residuals)))
+}
+p.boot.nparm <- mean(G.boot.nparm >= G.null)
+
+# PARAMETRIC: Calculate p-values ----------------------------------------------
+# Create sampling distribution of G statistic under null hypothesis
+n <- nrow(df1)
+B <- 5000
+G.boot.parm <- rep(0, B)
+for (b in 1:B) {
+  y.new <- median(df1$strength) + rnorm(n, 0, sd(residuals.null))
+  model.boot <- rfit(y.new ~ ., df1)
+  G.boot.parm[b] <- max(0, sum(
+    abs(residuals.null)) - sum(abs(model.boot$residuals)))
+}
+p.boot.parm <- mean(G.boot.parm >= G.null)
+
+# Create dataframe with results
+p.vec <- c(p.boot.nparm=p.boot.nparm, p.boot.parm=p.boot.parm)
+
+kable(p.vec, caption="Statistical significance (p-value) of null model", 
+      digits=3)
+
+```
+
+Finally, I constructed 95% confidence intervals for the estimates of the regression coefficients using a bootstrapped _t_-distribution. Table 3 displays the estimates of the coefficients for each of the predictors along with the lower and upper bounds of a 95% confidence interval.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+
+# Function to estimate SE using bootstrap
+estimate_se_boot <- function(data, coef.idx, B) {
+  # Estimate bootstrap SE for correlation coefficient
+  n <- nrow(data)
+  coef.boot <- rep(0, B)
+  for (b in 1:B) {
+    idx <- sample(1:n, n, replace=T)
+    coef.boot[b] <- rfit(strength ~ ., data=data[idx, ])$coefficients[coef.idx]
+  }
+  return(sd(coef.boot))
+}
+
+# Construct bootstrapped t-distribution
+ci.boot <- matrix(0, nrow=4, ncol=2)
+for (i in 2:5) {
+  B <- 100
+  t.boot <- rep(0, B)
+  for (b in 1:B) {
+    df.boot <- df1[sample(1:n, n, replace=T), ]
+    coef.boot <- rfit(strength ~ ., data=df.boot)$coefficients[i]
+    se.boot <- estimate_se_boot(df.boot, i, 30)
+    t.boot[b] <- (coef.boot - model.full$coefficients[i]) / se.boot
+  }
+  
+  # Compute SE for observed sample
+  se.full <- estimate_se_boot(df1, i, 30)
+  
+  # Compute confidence interval
+  ci.boot[i-1, ] <- c(model.full$coefficients[i]+se.full*sort(t.boot)[B * 0.025],
+                      model.full$coefficients[i]+se.full*sort(t.boot)[B * 0.975])
+}
+
+# Create table with coefficient estimates and confidence intervals
+coef.table <- data.frame(cbind(model.full$coefficients[2:5],
+                               ci.boot))
+names(coef.table) <- c("estimate", "lower bound", "upper bound")
+
+kable(coef.table)
+
+```
+
+## Nadarya-Watson Kernel Regression Model
+
+While many of the assumptions required to fit a linear regression model on this data seem to hold, it is sometimes advisable to instead use a non-parametric regression method and compare the results. I fit four separate models on the data, each univariate with a single predictor, using the Nadarya-Watson Kernel Regression method. The technique extends the ideas of kernel density estimation to fit a regression model without relying on distributional assumptions. In order to fit the model, one must select a kernel used to estimate the density within each band, and the bandwidth that serves as a smoothing parameter. In this case, I used a normal kernel and selected the bandwidth using leave-one-out cross validation.
+
+First, I used leave-one-out cross validation to select an optimal bandwidth, relying on just the `age` variable to determine the bandwidth for each model. I tested five different bandwidth options: 0.5, 1.0, 1.7, 2.5, and 5.0. I computed the mean absolute error associated with each to select the bandwidth that resulted in the lowest error.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+
+# NADARYA-WATSON KERNEL REGRESSION --------------------------------------------
+y <- df1$strength
+x <- df1$age
+
+y.1.0 <- rep(0, n)
+y.1.7 <- rep(0, n)
+y.2.5 <- rep(0, n)
+y.5.0 <- rep(0, n)
+y.10  <- rep(0, n)
+for (j in 1:n) {
+  # leave out one observation
+  x.loo <- x[-j]
+  y.loo <- y[-j]
+  
+  # fit models with different bandwidths and predict the left out obs
+  mod.bw1.0 <- ksmooth(x.loo, y.loo, kernel="normal", bandwidth=1.0)
+  mod.bw1.7 <- ksmooth(x.loo, y.loo, kernel="normal", bandwidth=1.7)
+  mod.bw2.5 <- ksmooth(x.loo, y.loo, kernel="normal", bandwidth=2.5)
+  mod.bw5.0 <- ksmooth(x.loo, y.loo, kernel="normal", bandwidth=5.0)
+  mod.bw10  <- ksmooth(x.loo, y.loo, kernel="normal", bandwidth=10)
+  y.1.0[j]  <- mod.bw1.0$y[which.min(abs(mod.bw1.0$x - x[j]))]
+  y.1.7[j]  <- mod.bw1.7$y[which.min(abs(mod.bw1.7$x - x[j]))]
+  y.2.5[j]  <- mod.bw2.5$y[which.min(abs(mod.bw2.5$x - x[j]))]
+  y.5.0[j]  <- mod.bw5.0$y[which.min(abs(mod.bw5.0$x - x[j]))]
+  y.10[j]   <- mod.bw10$y[which.min(abs(mod.bw10$x - x[j]))]
+}
+
+# Compute MAE
+mae <- c(bw1.0 = mean(abs(y - y.1.0)),
+         bw1.7 = mean(abs(y - y.1.7)),
+         bw2.5 = mean(abs(y - y.2.5)),
+         bw5.0 = mean(abs(y - y.5.0)),
+         bw10  = mean(abs(y - y.10)))
+mae
+
+```
+
+Figure 4 shows difference in mean absolute error for each level of the bandwidth parameter. The bandwidth that produces the lowest mean absolute error appears to be bandwidth 1.0.
+
+```{r, echo=TRUE, fig.cap="Validation curve for bandwidth selection", fig.height=3, fig.width=4, message=FALSE, warning=FALSE}
+
+# Plot validation curve for bandwidth parameter
+mae.plot <- data.frame(x=c(1, 1.7, 2.5, 5, 10), mae=mae)
+ggplot(data=mae.plot, aes(x=x, y=mae)) + geom_smooth()
+
+```
+
+Using the best bandwidth parameter from before, I fit both a linear model and the non-parametric smoothed model using kernel regression and computed associated $R^2$ values for each.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+y <- df1$strength
+x <- df1$age
+
+# Fit a linear model
+model.linear <- lm(y ~ x)
+
+# Nadarya-Watson kernel regression
+model.nparm <- ksmooth(x, y, kernel="normal", bandwidth=1)
+
+# Print R^2 values
+c(linear=summary(model.linear)$r.squared,
+  kernel=cor(y, y.1.0)^2)
+```
+
+Figure 5 shows the fitted values for both the linear and kernel smoothing models plotted as lines.
+
+```{r, echo=TRUE, fig.cap="Fitted regression models", fig.height=4.5, fig.width=4, message=FALSE, warning=FALSE}
+
+# Plot on same axis
+plot(x, y)
+lines(model.nparm, col="blue")
+abline(model.linear, col="red")
+legend(0, 80, c("kernel", "linear"), lty=c(1, 1), col=c("blue", "red"))
+
+
+```
+
+Finally, I compared the mean absolute error from the kernel regression and that of the linear model. The mean absolute error for the kernel regression appears to be slightly lower than that of the linear model.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+# Determine whether nonparametric fit is better than linear fit
+mae.comp <- c(linear=mean(abs(y - model.linear$fitted.values)),
+              kernel=mean(abs(y - y.1.0)))
+mae.comp
+
+```
+
+
+
+# Survival of Passengers on the RMS Titanic
+
+This section seeks to develop a model for predicting the survival of passengers on the RMS Titanic based on their age and the class of their ticket. The data consists of 891 passengers, with a binary outcome variable indicating survival. The two predictors used in this model are the age of the passenger and a factor variable indicating the class of the passenger's ticket, either 1, 2, or 3.
+
+The following sections first explore the data to ensure its fitness for analysis, then fits both generalized linear models and generalized additive models using the predictors. I then investigate whether the inclusion of interaction terms with the GLM and GAM influences the fit of the models. Finally, I compute odds ratios for the predictors.
+
+## Exploring the Data
+
+As before, it is important to investigate the data to understand the range and distribution of each variable, and determine if there are missing values or outliers that must be remediated. Since we only have one continuous predictor, we do not need to consider its scale.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+
+# load data set
+titanic <- read.csv("data/titanic.csv")
+
+# encode Pclass as factor variable
+titanic$Pclass <- as.factor(titanic$Pclass)
+
+# limit the dataset to only the variables under consideration
+df2 <- select(titanic, c("Survived", "Age", "Pclass"))
+
+# Print summary statistics of the variables
+summary(df2)
+```
+
+However, it is necessary to check for missing values. After investigation, it is clear that the `Age` variable contains a number of missing values that should be imputed.
+
+Usually it is inadvisable to impute values with a simple mean across the entire data set. A better approach is to group the observations using other variables, then impute with those group averages. In this case, I have imputed the values using the group median for `SibSp` within `Pclass`, which roughly corresponds to selecting the median age for passengers with families of a certain size within each class. This provides a far more accurate imputation than simply using the group average and also provides more variation in the variable.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+
+# group dataframe by Pclass, then impute Age with group median
+tbl.age <- titanic %>% 
+  group_by(Pclass, SibSp) %>% 
+  summarise(age = median(Age, na.rm=T))
+
+# fill in remaining missing values with the median for Pclass=3
+tbl.age[is.na(tbl.age$age), "age"] <- 24
+
+# fill in missing values of Age with group median
+titanic[is.na(titanic$Age), "Age"] <- inner_join(titanic[is.na(titanic$Age), ], 
+                                                 tbl.age, 
+                                                 by=c("Pclass", "SibSp"))$age
+
+# limit the dataset to only the variables under consideration
+df2 <- select(titanic, c("Survived", "Age", "Pclass"))
+
+```
+
+Next, I plotted a matrix of distribution comparisons between the three variables included in the model. Figure 6 shows in the top right and middle left charts that the passengers are distributed fairly equally across both `Age` and `Pclass`, and the kernel density plot in the center shows `Age` to be fairly well-behaved, thus likely not requiring any transformation.
+
+```{r, echo=TRUE, fig.cap="Scatterplot matrix of predictor variables", fig.height=4, fig.width=5, message=FALSE, warning=FALSE}
+
+ggpairs(df2)
+
+```
+
+## GLMs and GAMs with and without interaction
+
+In order to investigate the effect of including interaction terms in the models, I fit both a GLM and GAM with and without interaction terms included. Interaction terms were created by creating additional predictors from the `Age` variable, but only including the values for those passengers of a certain class. This was repeated for each level of the predictor `Pclass`.
+
+I then fit each model using 10-fold cross validation to obtain an estimate of out-of-sample misclassication error for each model. Based on the estimated misclassification rate, the GAM with interaction terms included appears to perform the best in predicting whether a passenger survived using just the passenger's age and fare class.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+# FIT MODELS ------------------------------------------------------------------
+
+n <- nrow(titanic)
+
+# interaction variables
+y <- titanic$Survived
+x1 <- titanic$Age
+x2.int <- x1
+x2.int[which(titanic$Pclass == 2)] <- 0
+x3.int <- x1
+x3.int[which(titanic$Pclass == 3)] <- 0
+titanic.int <- data.frame(x1, x2.int, x3.int, y)
+
+
+# Fit models and compute k-fold CV misclassication rate
+compute_misclass_rate <- function(pred.class, true.class, produceOutput=FALSE) {
+  ###
+  # Creates a confusion matrix based on predicted y-hat
+  # compared to true class labels.
+  ###
+  confusion.mat <- table(pred.class, true.class)
+  if (produceOutput == FALSE) {
+    return (1-sum(diag(confusion.mat)) / sum(confusion.mat))	
+  }
+  else {
+    print('misclass')
+    print(1-sum(diag(confusion.mat)) / sum(confusion.mat))
+    print('confusion mat')
+    print(confusion.mat)
+  }
+}
+
+n.folds <- 10
+folds.idx <- sample(rep(1:n.folds, length.out = n))
+cv.error <- matrix(0, n.folds, 4)
+for (k in 1:n.folds) {
+  test.idx <- which(folds.idx == k)
+  
+  ## Noninteraction models:
+  train.nonint <- titanic[-test.idx, ]
+  test.nonint <- titanic[test.idx, ]
+  
+  # GLM
+  glm.nonint <- glm(Survived ~ Age + Pclass, data=train.nonint, 
+                    family='binomial')
+  probs <- predict(glm.nonint, newdata=test.nonint, type='response')
+  y.hat <- rep(0, length(test.idx))
+  y.hat[probs > 0.5] <- 1
+  cv.error[k, 1] <- compute_misclass_rate(y.hat, test.nonint$Survived)
+  
+  # GAM
+  gam.nonint <- gam(Survived ~ s(Age) + Pclass, data=train.nonint, 
+                    family='binomial')
+  probs <- predict(gam.nonint, newdata=test.nonint, type='response')
+  y.hat <- rep(0, length(test.idx))
+  y.hat[probs > 0.5] <- 1
+  cv.error[k, 2] <- compute_misclass_rate(y.hat, test.nonint$Survived)
+  
+  ## Interaction models:
+  train.int <- titanic.int[-test.idx, ]
+  test.int <- titanic.int[test.idx, ]
+  
+  # GLM
+  glm.int <- glm(y ~ x1 + x2.int + x3.int, data=titanic.int, family='binomial')
+  probs <- predict(glm.int, newdata=test.int, type='response')
+  y.hat <- rep(0, length(test.idx))
+  y.hat[probs > 0.5] <- 1
+  cv.error[k, 3] <- compute_misclass_rate(y.hat, test.int$y)
+  
+  # GAM
+  gam.int <- gam(y ~ s(x1) + s(x2.int) + s(x3.int), 
+                 data=titanic.int, family='binomial')
+  probs <- predict(gam.int, newdata=test.int, type='response')
+  y.hat <- rep(0, length(test.idx))
+  y.hat[probs > 0.5] <- 1
+  cv.error[k, 4] <- compute_misclass_rate(y.hat, test.int$y)
+}
+colnames(cv.error) <- c("glm.nonint", "gam.nonint", "glm.int", "gam.int")
+
+```
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+
+apply(cv.error, 2, mean)
+
+```
+
+Comprehensive summary statistics for each of the models can be found in Appendix A.
+
+Figure 7 plots the smooth function components for each of the smoothed predictors in the two generalized additive models.
+
+```{r, echo=TRUE, fig.cap="Histogram of Age, before and after log transformation", fig.height=6, fig.width=6, message=FALSE, warning=FALSE}
+
+par(mfrow=c(2, 2))
+plot(gam.nonint, shade=T)
+plot(gam.int, shade=T)
+
+```
+
+
+## Odds Ratios
+
+Finally, I computed odds ratios for each model, examining the effect of age for both first and second class passengers. The four scenarios examined include:
+
+* Class = 1, Age = 25th percentile -> 50th
+* Class = 1, Age = 50th percentile -> 75th
+* Class = 2, Age = 25th percentile -> 50th
+* Class = 2, Age = 50th percentile -> 75th
+
+As we can see from the Table 4, as the passenger's age increases, the likelihood that they will survive decreases. For instance, according to the GLM without interaction terms, as a first-class passenger increases in age from the 25th percentile to the 50th percentile, they are 85% as likely to survive as a similar passenger with an age in the 25th percentile. The decrease in likelihood of survival is even sharper for those aging from the 50th percentile to the 75th percentile, while the class only seems to have an effect according to the interaction models. While the estimates vary somewhat depending on the model, the general conclusions one can draw are all fairly similar.
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+
+## Odds ratio (k=1)
+# 25th -> 50th
+mu.1_1 <- matrix(0, nrow=4, ncol=2)
+gamma.1_1 <- rep(0, 4)
+tbl.nonint.1_1 <- data.frame(Age=c(quantile(df2$Age, 0.25), 
+                                   quantile(df2$Age, 0.5)),
+                             Pclass=as.factor(c(1, 1)))
+tbl.int.1_1 <- data.frame(x1=c(quantile(df2$Age, 0.25), 
+                               quantile(df2$Age, 0.5)),
+                          x2.int=0, x3.int=0)
+mu.1_1[1, ] <- predict(glm.nonint, newdata=tbl.nonint.1_1)
+mu.1_1[2, ] <- predict(gam.nonint, newdata=tbl.nonint.1_1)
+mu.1_1[3, ] <- predict(glm.int, newdata=tbl.int.1_1)
+mu.1_1[4, ] <- predict(gam.int, newdata=tbl.int.1_1)
+gamma.1_1[1] <- exp(mu.1_1[1, 2] - mu.1_1[1, 1])
+gamma.1_1[2] <- exp(mu.1_1[2, 2] - mu.1_1[2, 1])
+gamma.1_1[3] <- exp(mu.1_1[3, 2] - mu.1_1[3, 1])
+gamma.1_1[4] <- exp(mu.1_1[4, 2] - mu.1_1[4, 1])
+
+# 50th -> 75th
+mu.2_1 <- matrix(0, nrow=4, ncol=2)
+gamma.2_1 <- rep(0, 4)
+tbl.nonint.2_1 <- data.frame(Age=c(quantile(df2$Age, 0.5), 
+                                   quantile(df2$Age, 0.75)),
+                             Pclass=as.factor(c(1, 1)))
+tbl.int.2_1 <- data.frame(x1=c(quantile(df2$Age, 0.5), 
+                               quantile(df2$Age, 0.75)),
+                          x2.int=0, x3.int=0)
+mu.2_1[1, ] <- predict(glm.nonint, newdata=tbl.nonint.2_1)
+mu.2_1[2, ] <- predict(gam.nonint, newdata=tbl.nonint.2_1)
+mu.2_1[3, ] <- predict(glm.int, newdata=tbl.int.2_1)
+mu.2_1[4, ] <- predict(gam.int, newdata=tbl.int.2_1)
+gamma.2_1[1] <- exp(mu.2_1[1, 2] - mu.2_1[1, 1])
+gamma.2_1[2] <- exp(mu.2_1[2, 2] - mu.2_1[2, 1])
+gamma.2_1[3] <- exp(mu.2_1[3, 2] - mu.2_1[3, 1])
+gamma.2_1[4] <- exp(mu.2_1[4, 2] - mu.2_1[4, 1])
+
+## Odds ratio (k=2)
+# 25th -> 50th
+mu.1_2 <- matrix(0, nrow=4, ncol=2)
+gamma.1_2 <- rep(0, 4)
+tbl.nonint.1_2 <- data.frame(Age=c(quantile(df2$Age, 0.25), 
+                                   quantile(df2$Age, 0.5)),
+                             Pclass=as.factor(c(2, 2)))
+tbl.int.1_2 <- data.frame(x1=c(quantile(df2$Age, 0.25), 
+                               quantile(df2$Age, 0.5)),
+                          x2.int=c(quantile(df2$Age, 0.25), 
+                                   quantile(df2$Age, 0.5)), 
+                          x3.int=0)
+mu.1_2[1, ] <- predict(glm.nonint, newdata=tbl.nonint.1_2)
+mu.1_2[2, ] <- predict(gam.nonint, newdata=tbl.nonint.1_2)
+mu.1_2[3, ] <- predict(glm.int, newdata=tbl.int.1_2)
+mu.1_2[4, ] <- predict(gam.int, newdata=tbl.int.1_2)
+gamma.1_2[1] <- exp(mu.1_2[1, 2] - mu.1_2[1, 1])
+gamma.1_2[2] <- exp(mu.1_2[2, 2] - mu.1_2[2, 1])
+gamma.1_2[3] <- exp(mu.1_2[3, 2] - mu.1_2[3, 1])
+gamma.1_2[4] <- exp(mu.1_2[4, 2] - mu.1_2[4, 1])
+
+# 50th -> 75th
+mu.2_2 <- matrix(0, nrow=4, ncol=2)
+gamma.2_2 <- rep(0, 4)
+tbl.nonint.2_2 <- data.frame(Age=c(quantile(df2$Age, 0.5), 
+                                   quantile(df2$Age, 0.75)),
+                             Pclass=as.factor(c(2, 2)))
+tbl.int.2_2 <- data.frame(x1=c(quantile(df2$Age, 0.5), 
+                               quantile(df2$Age, 0.75)),
+                          x2.int=c(quantile(df2$Age, 0.5), 
+                                   quantile(df2$Age, 0.75)), 
+                          x3.int=0)
+mu.2_2[1, ] <- predict(glm.nonint, newdata=tbl.nonint.2_2)
+mu.2_2[2, ] <- predict(gam.nonint, newdata=tbl.nonint.2_2)
+mu.2_2[3, ] <- predict(glm.int, newdata=tbl.int.2_2)
+mu.2_2[4, ] <- predict(gam.int, newdata=tbl.int.2_2)
+gamma.2_2[1] <- exp(mu.2_2[1, 2] - mu.2_2[1, 1])
+gamma.2_2[2] <- exp(mu.2_2[2, 2] - mu.2_2[2, 1])
+gamma.2_2[3] <- exp(mu.2_2[3, 2] - mu.2_2[3, 1])
+gamma.2_2[4] <- exp(mu.2_2[4, 2] - mu.2_2[4, 1])
+
+data.frame(k1_25_50=gamma.1_1, k1_50_75=gamma.2_1, 
+           k2_25_50=gamma.1_2, k2_50_75=gamma.2_2, 
+           row.names=c("glm.nonint", "gam.nonint", "glm.int", "gam.int"))
+```
+
+# References
+I-Cheng Yeh, "Modeling of strength of high performance concrete using artificial 
+neural networks," Cement and Concrete Research, Vol. 28, No. 12, pp. 1797-1808 (1998)
+
+Titanic: Machine Learning from Disaster | Kaggle, www.kaggle.com/c/titanic/data.
+
+# Appendix
+## A. Summary Statistics for GLMs and GAMs from Titanic Data
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+
+# Summary statistics for each model
+summary(glm.nonint)
+summary(gam.nonint)
+summary(glm.int)
+summary(gam.int)
+
+```
